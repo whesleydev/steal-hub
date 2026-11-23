@@ -3,7 +3,7 @@
 -- sem webhook, sem HttpPost, sem leitura de arquivo. so a UI do Rayfield e a atualizacao vem de fora.
 
 local BASE = "https://raw.githubusercontent.com/whesleydev/steal-hub/main"
-local SCRIPT_VERSION = 10
+local SCRIPT_VERSION = 11
 
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
@@ -68,6 +68,7 @@ local state = {
     useAir = true,
     flyHeight = 45,
     jumpFly = true,
+    maxFlyHeight = 150,
 }
 
 -- ===== configuracao persistente =====
@@ -127,6 +128,7 @@ if saved then
     if type(saved.jumpFly) == "boolean" then
         state.jumpFly = saved.jumpFly
     end
+    state.maxFlyHeight = tonumber(saved.maxFlyHeight) or state.maxFlyHeight
     state.bubblePos = saved.bubblePos
 end
 
@@ -163,6 +165,7 @@ local function saveConfig()
         useAir = state.useAir,
         flyHeight = state.flyHeight,
         jumpFly = state.jumpFly,
+        maxFlyHeight = state.maxFlyHeight,
         bubblePos = state.bubblePos,
     }
     local ok, encoded = pcall(function()
@@ -500,128 +503,135 @@ local function steal(prompt)
     end
 end
 
--- ===== voo =====
-local function stopFly()
-    state.fly = false
-    state.vy = 0
-    if state.bv then
-        pcall(function()
-            state.bv:Destroy()
-        end)
-        state.bv = nil
-    end
-    if state.bg then
-        pcall(function()
-            state.bg:Destroy()
-        end)
-        state.bg = nil
-    end
-    local root = rootPart()
-    if root then
-        local leftover = root:FindFirstChild("hubFly")
-        if leftover then
-            leftover:Destroy()
-        end
-    end
-end
-
-session.stopFly = stopFly
-
-local function startFly()
-    local root = rootPart()
-    if not root then
-        return
-    end
-    stopFly()
-    state.fly = true
-    state.bv = Instance.new("BodyVelocity")
-    state.bv.Name = "hubFly"
-    state.bv.MaxForce = Vector3.new(1e5, 1e5, 1e5)
-    state.bv.Velocity = Vector3.zero
-    state.bv.Parent = root
-    state.bg = Instance.new("BodyGyro")
-    state.bg.MaxTorque = Vector3.new(1e5, 1e5, 1e5)
-    state.bg.P = 12000
-    state.bg.Parent = root
-
-    task.spawn(function()
-        while state.fly and _G.__stealHub == session do
-            RunService.RenderStepped:Wait()
-            local current = LocalPlayer.Character
-            local hrp = current and current:FindFirstChild("HumanoidRootPart")
-            local humanoid = current and current:FindFirstChildOfClass("Humanoid")
-            if not hrp or not humanoid or not state.bv then
-                break
-            end
-            local direction = humanoid.MoveDirection
-            state.bv.Velocity = direction * state.flySpeed
-                    + Vector3.new(0, state.vy * state.flySpeed, 0)
-            if workspace.CurrentCamera and state.bg then
-                state.bg.CFrame = workspace.CurrentCamera.CFrame
-            end
-        end
-    end)
-end
-
--- ===== voo segurando o pulo =====
-local jumpHold = 0
-local pressedUntil = 0
-local jumpFlyActive = false
-local jumpFlyBody = nil
+-- ===== voo: rig de posicao, nao briga com a fisica =====
+local flyRig = {
+    active = false,
+    align = nil,
+    orient = nil,
+    attach = nil,
+    target = nil,
+    holdTimer = 0,
+    pressedUntil = 0,
+}
 
 session.connections[#session.connections + 1] = UserInputService.JumpRequest:Connect(function()
-    pressedUntil = os.clock() + 0.35
+    flyRig.pressedUntil = os.clock() + 0.35
 end)
 
-local function stopJumpFly()
-    jumpFlyActive = false
-    if jumpFlyBody then
-        pcall(function()
-            jumpFlyBody:Destroy()
-        end)
-        jumpFlyBody = nil
+local function destroyRig()
+    for _, key in ipairs({"align", "orient", "attach"}) do
+        local object = flyRig[key]
+        if object then
+            pcall(function()
+                object:Destroy()
+            end)
+            flyRig[key] = nil
+        end
+    end
+    flyRig.active = false
+    flyRig.target = nil
+    local char = LocalPlayer.Character
+    local humanoid = char and char:FindFirstChildOfClass("Humanoid")
+    if humanoid then
+        humanoid.WalkSpeed = state.speed
     end
 end
 
-local function updateJumpFly(dt)
-    if not state.jumpFly or state.fly then
-        if jumpFlyActive then
-            stopJumpFly()
-        end
-        return
+session.stopFly = destroyRig
+
+local function buildRig()
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local humanoid = char and char:FindFirstChildOfClass("Humanoid")
+    if not root or not humanoid then
+        return false
     end
+
+    flyRig.attach = Instance.new("Attachment")
+    flyRig.attach.Name = "hubFlyAttach"
+    flyRig.attach.Parent = root
+
+    flyRig.align = Instance.new("AlignPosition")
+    flyRig.align.Name = "hubFlyAlign"
+    flyRig.align.Attachment0 = flyRig.attach
+    flyRig.align.Mode = Enum.PositionAlignmentMode.OneAttachment
+    flyRig.align.MaxForce = 1e6
+    flyRig.align.MaxVelocity = 1e4
+    flyRig.align.Responsiveness = 45
+    flyRig.align.Position = root.Position
+    flyRig.align.Parent = root
+
+    flyRig.orient = Instance.new("AlignOrientation")
+    flyRig.orient.Attachment0 = flyRig.attach
+    flyRig.orient.Mode = Enum.OrientationAlignmentMode.OneAttachment
+    flyRig.orient.MaxTorque = 1e6
+    flyRig.orient.Responsiveness = 45
+    flyRig.orient.CFrame = CFrame.new(root.Position) * CFrame.Angles(0, math.rad(root.Orientation.Y), 0)
+    flyRig.orient.Parent = root
+
+    flyRig.target = root.Position
+    flyRig.active = true
+    humanoid.WalkSpeed = 0
+    return true
+end
+
+local function updateFly(dt)
     local char = LocalPlayer.Character
     local humanoid = char and char:FindFirstChildOfClass("Humanoid")
     local root = char and char:FindFirstChild("HumanoidRootPart")
     if not humanoid or not root then
+        if flyRig.active then
+            destroyRig()
+        end
         return
+    end
+
+    if flyRig.active and (not flyRig.align or not flyRig.align.Parent) then
+        destroyRig()
     end
 
     local held = UserInputService:IsKeyDown(Enum.KeyCode.Space)
             or humanoid.Jump
-            or os.clock() < pressedUntil
+            or os.clock() < flyRig.pressedUntil
 
     if held then
-        jumpHold = math.min(jumpHold + dt, 4)
+        flyRig.holdTimer = math.min(flyRig.holdTimer + dt, 4)
     else
-        jumpHold = math.max(jumpHold - dt * 2.5, 0)
+        flyRig.holdTimer = math.max(flyRig.holdTimer - dt * 3, 0)
     end
 
-    if jumpHold > 0.45 then
-        if not jumpFlyActive then
-            jumpFlyActive = true
-            jumpFlyBody = Instance.new("BodyVelocity")
-            jumpFlyBody.Name = "hubJumpFly"
-            jumpFlyBody.MaxForce = Vector3.new(1e5, 1e5, 1e5)
-            jumpFlyBody.Parent = root
+    local wantFly = state.fly or (state.jumpFly and flyRig.holdTimer > 0.45)
+    if not wantFly then
+        if flyRig.active then
+            destroyRig()
         end
-        if jumpFlyBody then
-            local move = humanoid.MoveDirection
-            jumpFlyBody.Velocity = Vector3.new(move.X * state.flySpeed,
-                    state.flySpeed * 0.8, move.Z * state.flySpeed)
-        end
-    elseif jumpFlyActive then
-        stopJumpFly()
+        return
+    end
+
+    if not flyRig.active and not buildRig() then
+        return
+    end
+    if not flyRig.align or not flyRig.target then
+        return
+    end
+
+    local speed = state.flySpeed
+    local move = humanoid.MoveDirection
+    local step = Vector3.new(move.X, 0, move.Z) * speed * dt
+    local rise = 0
+
+    if held and root.Position.Y < state.maxFlyHeight then
+        rise = speed * 0.7 * dt
+    end
+    if state.vy ~= 0 then
+        rise = state.vy * speed * 0.7 * dt
+    end
+
+    flyRig.target = flyRig.target + step + Vector3.new(0, rise, 0)
+    flyRig.align.Position = flyRig.target
+    if flyRig.orient then
+        flyRig.orient.CFrame = CFrame.new(flyRig.target)
+                * CFrame.Angles(0, math.rad(root.Orientation.Y), 0)
     end
 end
 
@@ -632,7 +642,7 @@ local function applyMovement()
     end
     local humanoid = char:FindFirstChildOfClass("Humanoid")
     if humanoid then
-        humanoid.WalkSpeed = state.speed
+        humanoid.WalkSpeed = flyRig.active and 0 or state.speed
         humanoid.UseJumpPower = true
         humanoid.JumpPower = state.jump
     end
@@ -1143,7 +1153,7 @@ jumpFlyToggle = FlyTab:CreateToggle({
     Callback = function(value)
         state.jumpFly = value
         if not value then
-            stopJumpFly()
+            destroyRig()
         end
         markDirty()
     end,
@@ -1155,9 +1165,10 @@ FlyTab:CreateToggle({
     Flag = "fly",
     Callback = function(value)
         if value then
-            startFly()
+            state.fly = true
         else
-            stopFly()
+            state.fly = false
+            destroyRig()
         end
     end,
 })
@@ -1171,6 +1182,19 @@ FlyTab:CreateSlider({
     Flag = "flyspeed",
     Callback = function(value)
         state.flySpeed = value
+        markDirty()
+    end,
+})
+
+FlyTab:CreateSlider({
+    Name = "Altura maxima",
+    Range = {50, 400},
+    Increment = 25,
+    Suffix = "studs",
+    CurrentValue = state.maxFlyHeight,
+    Flag = "maxheight",
+    Callback = function(value)
+        state.maxFlyHeight = value
         markDirty()
     end,
 })
@@ -1196,7 +1220,9 @@ FlyTab:CreateToggle({
 FlyTab:CreateButton({
     Name = "Pousar (desligar voo)",
     Callback = function()
-        stopFly()
+        state.fly = false
+        state.vy = 0
+        destroyRig()
     end,
 })
 
@@ -1265,6 +1291,7 @@ VisualTab:CreateButton({
 
 -- ===== loops =====
 LocalPlayer.CharacterAdded:Connect(function()
+    destroyRig()
     task.wait(1)
     applyMovement()
     if state.esp then
@@ -1309,7 +1336,7 @@ task.spawn(function()
 end)
 
 session.connections[#session.connections + 1] = RunService.Heartbeat:Connect(function(dt)
-    updateJumpFly(dt)
+    updateFly(dt)
 end)
 
 task.spawn(function()
