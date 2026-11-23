@@ -3,7 +3,7 @@
 -- sem webhook, sem HttpPost, sem leitura de arquivo. so a UI do Rayfield e a atualizacao vem de fora.
 
 local BASE = "https://raw.githubusercontent.com/whesleydev/steal-hub/main"
-local SCRIPT_VERSION = 7
+local SCRIPT_VERSION = 8
 
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
@@ -65,6 +65,8 @@ local state = {
     eggSpot = nil,
     useRoute = false,
     showStatus = true,
+    useAir = true,
+    flyHeight = 45,
 }
 
 -- ===== configuracao persistente =====
@@ -117,6 +119,10 @@ if saved then
     if type(saved.useRoute) == "boolean" then
         state.useRoute = saved.useRoute
     end
+    if type(saved.useAir) == "boolean" then
+        state.useAir = saved.useAir
+    end
+    state.flyHeight = tonumber(saved.flyHeight) or state.flyHeight
     state.bubblePos = saved.bubblePos
 end
 
@@ -150,6 +156,8 @@ local function saveConfig()
         home = state.home and {x = state.home.X, y = state.home.Y, z = state.home.Z} or nil,
         eggSpot = state.eggSpot and {x = state.eggSpot.X, y = state.eggSpot.Y, z = state.eggSpot.Z} or nil,
         useRoute = state.useRoute,
+        useAir = state.useAir,
+        flyHeight = state.flyHeight,
         bubblePos = state.bubblePos,
     }
     local ok, encoded = pcall(function()
@@ -307,17 +315,29 @@ local function antiFling()
 end
 
 -- ===== deslocamento por velocidade, nao por teleporte =====
-local function travelTo(target, speed)
+local statusLabel = nil
+
+local function status(text)
+    if statusLabel then
+        statusLabel.Text = text
+    end
+end
+
+local function travelTo(target, speed, height)
     local root = rootPart()
     if not root or not target then
         return false
     end
+    height = height or 0
+    local goal = target + Vector3.new(0, height, 0)
     local body = Instance.new("BodyVelocity")
     body.Name = "hubTravel"
     body.MaxForce = Vector3.new(1e5, 1e5, 1e5)
     body.Parent = root
-    local deadline = os.clock() + 8
+    local deadline = os.clock() + 9
     local reached = false
+    local descending = false
+
     while os.clock() < deadline do
         if _G.__stealHub ~= session then
             break
@@ -326,34 +346,40 @@ local function travelTo(target, speed)
         if not current then
             break
         end
-        local delta = target - current.Position
-        if delta.Magnitude < 7 then
-            reached = true
-            break
+        local delta = goal - current.Position
+
+        if descending then
+            local drop = target.Y - current.Position.Y
+            body.Velocity = Vector3.new(0, math.clamp(drop * 4, -70, 70), 0)
+            if math.abs(drop) < 4 then
+                reached = true
+                break
+            end
+        elseif delta.Magnitude < 8 then
+            if height > 1 then
+                descending = true
+            else
+                reached = true
+                break
+            end
+        else
+            local flat = Vector3.new(delta.X, 0, delta.Z)
+            local direction = flat.Magnitude > 0.1 and flat.Unit or Vector3.zero
+            local lift = 0
+            if delta.Y > 3 then
+                lift = math.min(speed, 70)
+            elseif delta.Y < -3 then
+                lift = -math.min(speed, 70)
+            end
+            body.Velocity = direction * math.min(speed, 130) + Vector3.new(0, lift, 0)
         end
-        local flat = Vector3.new(delta.X, 0, delta.Z)
-        local direction = flat.Magnitude > 0.1 and flat.Unit or Vector3.zero
-        local lift = 0
-        if delta.Y > 4 then
-            lift = 18
-        elseif delta.Y < -4 then
-            lift = -18
-        end
-        body.Velocity = direction * math.min(speed, 60) + Vector3.new(0, lift, 0)
         RunService.Heartbeat:Wait()
     end
+
     pcall(function()
         body:Destroy()
     end)
     return reached
-end
-
-local statusLabel = nil
-
-local function status(text)
-    if statusLabel then
-        statusLabel.Text = text
-    end
 end
 
 local function fireNearby(radius)
@@ -396,8 +422,9 @@ local function runRoute()
     if not state.eggSpot or not state.home then
         return false
     end
-    status("rota: indo pro ovo")
-    if not travelTo(state.eggSpot.Position + Vector3.new(0, 4, 0), state.travelSpeed) then
+    local ceiling = state.useAir and state.flyHeight or 0
+    status(string.format("rota: indo pro ovo (altura %d)", ceiling))
+    if not travelTo(state.eggSpot.Position, state.travelSpeed, ceiling) then
         status("rota: nao chegou no ovo")
         return false
     end
@@ -405,7 +432,7 @@ local function runRoute()
     fireNearby(14)
     task.wait(0.3)
     status("rota: voltando pra base")
-    travelTo(state.home.Position + Vector3.new(0, 4, 0), state.travelSpeed)
+    travelTo(state.home.Position, state.travelSpeed, ceiling)
     sweep(1.0)
     fireNearby(18)
     status("rota: ciclo completo")
@@ -766,6 +793,29 @@ MainTab:CreateButton({
     end,
 })
 
+MainTab:CreateToggle({
+    Name = "Voar durante a rota",
+    CurrentValue = state.useAir,
+    Flag = "useair",
+    Callback = function(value)
+        state.useAir = value
+        markDirty()
+    end,
+})
+
+MainTab:CreateSlider({
+    Name = "Altura do voo na rota",
+    Range = {0, 120},
+    Increment = 5,
+    Suffix = "studs",
+    CurrentValue = state.flyHeight,
+    Flag = "flyheight",
+    Callback = function(value)
+        state.flyHeight = value
+        markDirty()
+    end,
+})
+
 MainTab:CreateButton({
     Name = "Marcar ovo aqui",
     Callback = function()
@@ -860,7 +910,7 @@ MainTab:CreateSlider({
 
 MainTab:CreateSlider({
     Name = "Velocidade do roubo",
-    Range = {20, 60},
+    Range = {20, 120},
     Increment = 5,
     Suffix = "studs/s",
     CurrentValue = state.travelSpeed,
