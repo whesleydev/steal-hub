@@ -3,7 +3,7 @@
 -- sem webhook, sem HttpPost, sem leitura de arquivo. so a UI do Rayfield e a atualizacao vem de fora.
 
 local BASE = "https://raw.githubusercontent.com/whesleydev/steal-hub/main"
-local SCRIPT_VERSION = 6
+local SCRIPT_VERSION = 7
 
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
@@ -62,6 +62,9 @@ local state = {
     bv = nil,
     bg = nil,
     travelSpeed = 50,
+    eggSpot = nil,
+    useRoute = false,
+    showStatus = true,
 }
 
 -- ===== configuracao persistente =====
@@ -108,6 +111,12 @@ if saved then
     if type(saved.home) == "table" and saved.home.x then
         state.home = CFrame.new(saved.home.x, saved.home.y, saved.home.z)
     end
+    if type(saved.eggSpot) == "table" and saved.eggSpot.x then
+        state.eggSpot = CFrame.new(saved.eggSpot.x, saved.eggSpot.y, saved.eggSpot.z)
+    end
+    if type(saved.useRoute) == "boolean" then
+        state.useRoute = saved.useRoute
+    end
     state.bubblePos = saved.bubblePos
 end
 
@@ -139,6 +148,8 @@ local function saveConfig()
         returnHome = state.returnHome,
         esp = state.esp,
         home = state.home and {x = state.home.X, y = state.home.Y, z = state.home.Z} or nil,
+        eggSpot = state.eggSpot and {x = state.eggSpot.X, y = state.eggSpot.Y, z = state.eggSpot.Z} or nil,
+        useRoute = state.useRoute,
         bubblePos = state.bubblePos,
     }
     local ok, encoded = pcall(function()
@@ -337,6 +348,14 @@ local function travelTo(target, speed)
     return reached
 end
 
+local statusLabel = nil
+
+local function status(text)
+    if statusLabel then
+        statusLabel.Text = text
+    end
+end
+
 local function fireNearby(radius)
     local root = rootPart()
     if not root then
@@ -351,6 +370,46 @@ local function fireNearby(radius)
         end
     end
     return fired
+end
+
+local function sweep(seconds)
+    local root = rootPart()
+    if not root then
+        return
+    end
+    local body = Instance.new("BodyVelocity")
+    body.Name = "hubSweep"
+    body.MaxForce = Vector3.new(1e5, 1e5, 1e5)
+    body.Parent = root
+    local start = os.clock()
+    while (os.clock() - start) < seconds and _G.__stealHub == session do
+        local angle = (os.clock() - start) * 9
+        body.Velocity = Vector3.new(math.cos(angle) * 12, 0, math.sin(angle) * 12)
+        RunService.Heartbeat:Wait()
+    end
+    pcall(function()
+        body:Destroy()
+    end)
+end
+
+local function runRoute()
+    if not state.eggSpot or not state.home then
+        return false
+    end
+    status("rota: indo pro ovo")
+    if not travelTo(state.eggSpot.Position + Vector3.new(0, 4, 0), state.travelSpeed) then
+        status("rota: nao chegou no ovo")
+        return false
+    end
+    sweep(1.2)
+    fireNearby(14)
+    task.wait(0.3)
+    status("rota: voltando pra base")
+    travelTo(state.home.Position + Vector3.new(0, 4, 0), state.travelSpeed)
+    sweep(1.0)
+    fireNearby(18)
+    status("rota: ciclo completo")
+    return true
 end
 
 local function nearestPrompt()
@@ -539,6 +598,33 @@ bubbleStroke.Thickness = 2
 bubbleStroke.Transparency = 0.15
 bubbleStroke.Parent = bubble
 
+local statusGui = Instance.new("ScreenGui")
+statusGui.Name = "HubStatus"
+statusGui.ResetOnSpawn = false
+statusGui.IgnoreGuiInset = true
+statusGui.DisplayOrder = 999998
+statusGui.Enabled = state.showStatus
+statusGui.Parent = uiRoot()
+
+local statusText = Instance.new("TextLabel")
+statusText.Size = UDim2.fromOffset(300, 30)
+statusText.Position = UDim2.new(0.5, -150, 1, -70)
+statusText.BackgroundColor3 = Color3.fromRGB(14, 17, 23)
+statusText.BackgroundTransparency = 0.2
+statusText.BorderSizePixel = 0
+statusText.Text = "pronto"
+statusText.TextColor3 = Color3.fromRGB(150, 190, 255)
+statusText.Font = Enum.Font.Gotham
+statusText.TextSize = 13
+statusText.Parent = statusGui
+
+local statusCorner = Instance.new("UICorner")
+statusCorner.CornerRadius = UDim.new(0, 10)
+statusCorner.Parent = statusText
+
+statusLabel = statusText
+session.statusGui = statusGui
+
 session.bubble = bubbleGui
 
 local function showWindow(show)
@@ -677,6 +763,39 @@ MainTab:CreateButton({
     Name = "Minimizar em bolinha",
     Callback = function()
         showWindow(false)
+    end,
+})
+
+MainTab:CreateButton({
+    Name = "Marcar ovo aqui",
+    Callback = function()
+        local root = rootPart()
+        if root then
+            state.eggSpot = root.CFrame
+            markDirty()
+            Rayfield:Notify({Title = "Rota", Content = "Ovo marcado. Agora marque a base.", Duration = 4})
+        end
+    end,
+})
+
+MainTab:CreateToggle({
+    Name = "Usar rota gravada",
+    CurrentValue = state.useRoute,
+    Flag = "useroute",
+    Callback = function(value)
+        state.useRoute = value
+        markDirty()
+    end,
+})
+
+MainTab:CreateToggle({
+    Name = "Mostrar status na tela",
+    CurrentValue = state.showStatus,
+    Flag = "showstatus",
+    Callback = function(value)
+        state.showStatus = value
+        statusGui.Enabled = value
+        markDirty()
     end,
 })
 
@@ -939,10 +1058,17 @@ task.spawn(function()
     while _G.__stealHub == session do
         task.wait(0.25)
         if state.autoSteal and (os.clock() - state.lastSteal) > state.cooldown then
-            local prompt, distance = nearestPrompt()
-            if prompt and distance < 400 then
-                state.lastSteal = os.clock()
-                steal(prompt)
+            state.lastSteal = os.clock()
+            if state.useRoute and state.eggSpot and state.home then
+                runRoute()
+            else
+                local prompt, distance = nearestPrompt()
+                if prompt and distance < 400 then
+                    status(string.format("alvo: %s | %d studs", prompt.ActionText, math.floor(distance)))
+                    steal(prompt)
+                else
+                    status("sem alvo por perto")
+                end
             end
         end
     end
