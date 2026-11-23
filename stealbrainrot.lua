@@ -3,13 +3,14 @@
 -- sem webhook, sem HttpPost, sem leitura de arquivo. so a UI do Rayfield e a atualizacao vem de fora.
 
 local BASE = "https://raw.githubusercontent.com/whesleydev/steal-hub/main"
-local SCRIPT_VERSION = 5
+local SCRIPT_VERSION = 6
 
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
+local HttpService = game:GetService("HttpService")
 local LocalPlayer = Players.LocalPlayer
 
 -- ===== encerra a sessao anterior sem quebrar nada =====
@@ -63,6 +64,53 @@ local state = {
     travelSpeed = 50,
 }
 
+-- ===== configuracao persistente =====
+local CONFIG_PATH = "stealhub_config.json"
+
+local function hasFileApi()
+    return type(writefile) == "function" and type(readfile) == "function"
+end
+
+local function loadConfig()
+    if not hasFileApi() then
+        return nil
+    end
+    local ok, raw = pcall(function()
+        if type(isfile) == "function" and not isfile(CONFIG_PATH) then
+            return nil
+        end
+        return readfile(CONFIG_PATH)
+    end)
+    if not ok or type(raw) ~= "string" or #raw == 0 then
+        return nil
+    end
+    local decoded, data = pcall(function()
+        return HttpService:JSONDecode(raw)
+    end)
+    if not decoded or type(data) ~= "table" then
+        return nil
+    end
+    return data
+end
+
+local saved = loadConfig()
+if saved then
+    state.speed = tonumber(saved.speed) or state.speed
+    state.jump = tonumber(saved.jump) or state.jump
+    state.flySpeed = tonumber(saved.flySpeed) or state.flySpeed
+    state.travelSpeed = tonumber(saved.travelSpeed) or state.travelSpeed
+    if type(saved.returnHome) == "boolean" then
+        state.returnHome = saved.returnHome
+    end
+    if type(saved.esp) == "boolean" then
+        state.esp = saved.esp
+    end
+    if type(saved.home) == "table" and saved.home.x then
+        state.home = CFrame.new(saved.home.x, saved.home.y, saved.home.z)
+    end
+    state.bubblePos = saved.bubblePos
+end
+
 if session.prefs then
     state.speed = session.prefs.speed or state.speed
     state.jump = session.prefs.jump or state.jump
@@ -71,6 +119,41 @@ if session.prefs then
     state.home = session.prefs.home
     state.travelSpeed = session.prefs.travelSpeed or state.travelSpeed
 end
+
+local dirty = false
+
+local function markDirty()
+    dirty = true
+end
+
+local function saveConfig()
+    if not hasFileApi() then
+        return false
+    end
+    local data = {
+        version = SCRIPT_VERSION,
+        speed = state.speed,
+        jump = state.jump,
+        flySpeed = state.flySpeed,
+        travelSpeed = state.travelSpeed,
+        returnHome = state.returnHome,
+        esp = state.esp,
+        home = state.home and {x = state.home.X, y = state.home.Y, z = state.home.Z} or nil,
+        bubblePos = state.bubblePos,
+    }
+    local ok, encoded = pcall(function()
+        return HttpService:JSONEncode(data)
+    end)
+    if not ok then
+        return false
+    end
+    local wrote = pcall(function()
+        writefile(CONFIG_PATH, encoded)
+    end)
+    return wrote
+end
+
+session.saveConfig = saveConfig
 
 local ACTIONS = {"collect", "steal", "take", "grab", "pegar", "roubar", "egg", "ovo"}
 local BLOCKED = {"pass", "passe", "shop", "loja", "buy", "comprar", "premium", "robux",
@@ -432,7 +515,11 @@ bubbleGui.Parent = uiRoot()
 local bubble = Instance.new("TextButton")
 bubble.Name = "bubble"
 bubble.Size = UDim2.fromOffset(58, 58)
-bubble.Position = UDim2.new(0, 18, 0.45, 0)
+if state.bubblePos and state.bubblePos.x then
+    bubble.Position = UDim2.new(0, state.bubblePos.x, 0, state.bubblePos.y)
+else
+    bubble.Position = UDim2.new(0, 18, 0.45, 0)
+end
 bubble.BackgroundColor3 = Color3.fromRGB(14, 17, 23)
 bubble.BorderSizePixel = 0
 bubble.AutoButtonColor = false
@@ -498,6 +585,8 @@ session.connections[#session.connections + 1] = UserInputService.InputChanged:Co
         end
         bubble.Position = UDim2.new(startPosition.X.Scale, startPosition.X.Offset + delta.X,
                 startPosition.Y.Scale, startPosition.Y.Offset + delta.Y)
+        state.bubblePos = {x = bubble.Position.X.Offset, y = bubble.Position.Y.Offset}
+        markDirty()
     end
 end)
 
@@ -597,16 +686,18 @@ MainTab:CreateButton({
         local root = rootPart()
         if root then
             state.home = root.CFrame
+            markDirty()
         end
     end,
 })
 
 MainTab:CreateToggle({
     Name = "Voltar pra base depois de pegar",
-    CurrentValue = true,
+    CurrentValue = state.returnHome,
     Flag = "returnhome",
     Callback = function(value)
         state.returnHome = value
+        markDirty()
     end,
 })
 
@@ -630,6 +721,7 @@ MainTab:CreateSlider({
     Callback = function(value)
         state.speed = value
         applyMovement()
+        markDirty()
     end,
 })
 
@@ -643,6 +735,7 @@ MainTab:CreateSlider({
     Callback = function(value)
         state.jump = value
         applyMovement()
+        markDirty()
     end,
 })
 
@@ -655,6 +748,39 @@ MainTab:CreateSlider({
     Flag = "travel",
     Callback = function(value)
         state.travelSpeed = value
+        markDirty()
+    end,
+})
+
+MainTab:CreateButton({
+    Name = "Salvar configurações",
+    Callback = function()
+        if saveConfig() then
+            Rayfield:Notify({Title = "Config", Content = "Salvo.", Duration = 3})
+        else
+            Rayfield:Notify({Title = "Config", Content = "Executor sem permissão de arquivo.", Duration = 4})
+        end
+    end,
+})
+
+MainTab:CreateButton({
+    Name = "Restaurar padrão",
+    Callback = function()
+        if type(delfile) == "function" then
+            pcall(function()
+                delfile(CONFIG_PATH)
+            end)
+        end
+        state.speed = 16
+        state.jump = 50
+        state.flySpeed = 90
+        state.travelSpeed = 50
+        state.returnHome = true
+        state.esp = false
+        state.home = nil
+        clearEsp()
+        applyMovement()
+        Rayfield:Notify({Title = "Config", Content = "Padrão restaurado. Reabra o hub.", Duration = 4})
     end,
 })
 
@@ -709,6 +835,7 @@ FlyTab:CreateSlider({
     Flag = "flyspeed",
     Callback = function(value)
         state.flySpeed = value
+        markDirty()
     end,
 })
 
@@ -741,11 +868,12 @@ local VisualTab = Window:CreateTab("Visual", 4483362458)
 
 VisualTab:CreateToggle({
     Name = "ESP nos brainrots",
-    CurrentValue = false,
+    CurrentValue = state.esp,
     Flag = "esp",
     Callback = function(value)
         state.esp = value
         drawEsp()
+        markDirty()
     end,
 })
 
@@ -817,6 +945,23 @@ task.spawn(function()
                 steal(prompt)
             end
         end
+    end
+end)
+
+task.spawn(function()
+    while _G.__stealHub == session do
+        task.wait(1)
+        if dirty then
+            dirty = false
+            saveConfig()
+        end
+    end
+end)
+
+task.spawn(function()
+    task.wait(2)
+    if saved then
+        Rayfield:Notify({Title = "Config", Content = "Suas configurações voltaram.", Duration = 4})
     end
 end)
 
