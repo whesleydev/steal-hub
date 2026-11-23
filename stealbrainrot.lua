@@ -3,7 +3,7 @@
 -- sem webhook, sem HttpPost, sem leitura de arquivo. so a UI do Rayfield e a atualizacao vem de fora.
 
 local BASE = "https://raw.githubusercontent.com/whesleydev/steal-hub/main"
-local SCRIPT_VERSION = 9
+local SCRIPT_VERSION = 10
 
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
@@ -675,13 +675,30 @@ end
 local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
     or LocalPlayer:WaitForChild("PlayerGui", 10)
 
-local bubbleGui = Instance.new("ScreenGui")
-bubbleGui.Name = "HubBubble"
-bubbleGui.ResetOnSpawn = false
-bubbleGui.IgnoreGuiInset = true
-bubbleGui.DisplayOrder = 999999
-bubbleGui.Enabled = false
-bubbleGui.Parent = playerGui or uiRoot()
+local function makeGui(name, order)
+    local gui = Instance.new("ScreenGui")
+    gui.Name = name
+    gui.ResetOnSpawn = false
+    gui.IgnoreGuiInset = true
+    gui.DisplayOrder = order
+    local placed = pcall(function()
+        gui.Parent = playerGui
+    end)
+    if not placed or not gui.Parent then
+        pcall(function()
+            gui.Parent = game:GetService("CoreGui")
+        end)
+    end
+    if not gui.Parent then
+        pcall(function()
+            gui.Parent = uiRoot()
+        end)
+    end
+    return gui
+end
+
+local bubbleGui = makeGui("HubBubble", 999999)
+bubbleGui.Enabled = true
 
 local bubble = Instance.new("TextButton")
 bubble.Name = "bubble"
@@ -710,13 +727,8 @@ bubbleStroke.Thickness = 2
 bubbleStroke.Transparency = 0.15
 bubbleStroke.Parent = bubble
 
-local statusGui = Instance.new("ScreenGui")
-statusGui.Name = "HubStatus"
-statusGui.ResetOnSpawn = false
-statusGui.IgnoreGuiInset = true
-statusGui.DisplayOrder = 999998
+local statusGui = makeGui("HubStatus", 999998)
 statusGui.Enabled = state.showStatus
-statusGui.Parent = playerGui or uiRoot()
 
 local statusText = Instance.new("TextLabel")
 statusText.Size = UDim2.fromOffset(300, 30)
@@ -741,9 +753,6 @@ session.bubble = bubbleGui
 
 local function showWindow(show)
     local gui, main = findWindow()
-    if not gui and not show then
-        return false
-    end
     if gui then
         if main then
             main.Visible = show
@@ -751,12 +760,12 @@ local function showWindow(show)
             gui.Enabled = show
         end
     end
-    bubbleGui.Enabled = not show
-    if not show then
-        TweenService:Create(bubble, TweenInfo.new(0.25, Enum.EasingStyle.Back),
-                {Size = UDim2.fromOffset(58, 58)}):Play()
-    end
-    return true
+    local size = show and 42 or 58
+    TweenService:Create(bubble, TweenInfo.new(0.2, Enum.EasingStyle.Back),
+            {Size = UDim2.fromOffset(size, size)}):Play()
+    bubble.TextTransparency = show and 0.45 or 0
+    bubble.BackgroundTransparency = show and 0.45 or 0
+    return gui ~= nil
 end
 
 local dragging = false
@@ -849,7 +858,60 @@ local Window = Rayfield:CreateWindow({
 
 session.window = Window
 
+local speedSlider, jumpSlider, travelSlider, heightSlider
+local airToggle, routeToggle, jumpFlyToggle, espToggle
+
+local RECOMMENDED = {
+    speed = 18,
+    jump = 50,
+    flySpeed = 80,
+    travelSpeed = 85,
+    flyHeight = 60,
+    useAir = true,
+    returnHome = true,
+    jumpFly = true,
+    esp = true,
+    cooldown = 1.0,
+}
+
+local function applyRecommended()
+    state.speed = RECOMMENDED.speed
+    state.jump = RECOMMENDED.jump
+    state.flySpeed = RECOMMENDED.flySpeed
+    state.travelSpeed = RECOMMENDED.travelSpeed
+    state.flyHeight = RECOMMENDED.flyHeight
+    state.useAir = RECOMMENDED.useAir
+    state.returnHome = RECOMMENDED.returnHome
+    state.jumpFly = RECOMMENDED.jumpFly
+    state.cooldown = RECOMMENDED.cooldown
+
+    pcall(function()
+        speedSlider:Set(RECOMMENDED.speed)
+        jumpSlider:Set(RECOMMENDED.jump)
+        travelSlider:Set(RECOMMENDED.travelSpeed)
+        heightSlider:Set(RECOMMENDED.flyHeight)
+        airToggle:Set(RECOMMENDED.useAir)
+        routeToggle:Set(true)
+        jumpFlyToggle:Set(RECOMMENDED.jumpFly)
+        espToggle:Set(RECOMMENDED.esp)
+    end)
+
+    state.esp = RECOMMENDED.esp
+    applyMovement()
+    drawEsp()
+    markDirty()
+    Rayfield:Notify({Title = "Perfil recomendado",
+                     Content = "Aereo a 60 studs, 85 de velocidade, chao normal.", Duration = 6})
+end
+
 local MainTab = Window:CreateTab("Principal", 4483362458)
+
+MainTab:CreateButton({
+    Name = "Usar perfil recomendado",
+    Callback = function()
+        applyRecommended()
+    end,
+})
 
 MainTab:CreateToggle({
     Name = "Auto coletar",
@@ -885,7 +947,7 @@ MainTab:CreateButton({
     end,
 })
 
-MainTab:CreateToggle({
+airToggle = MainTab:CreateToggle({
     Name = "Voar durante a rota",
     CurrentValue = state.useAir,
     Flag = "useair",
@@ -895,7 +957,7 @@ MainTab:CreateToggle({
     end,
 })
 
-MainTab:CreateSlider({
+heightSlider = MainTab:CreateSlider({
     Name = "Altura do voo na rota",
     Range = {0, 120},
     Increment = 5,
@@ -920,7 +982,7 @@ MainTab:CreateButton({
     end,
 })
 
-MainTab:CreateToggle({
+routeToggle = MainTab:CreateToggle({
     Name = "Usar rota gravada",
     CurrentValue = state.useRoute,
     Flag = "useroute",
@@ -972,7 +1034,7 @@ MainTab:CreateButton({
     end,
 })
 
-MainTab:CreateSlider({
+speedSlider = MainTab:CreateSlider({
     Name = "Velocidade",
     Range = {16, 120},
     Increment = 2,
@@ -986,7 +1048,7 @@ MainTab:CreateSlider({
     end,
 })
 
-MainTab:CreateSlider({
+jumpSlider = MainTab:CreateSlider({
     Name = "Pulo",
     Range = {50, 120},
     Increment = 5,
@@ -1000,7 +1062,7 @@ MainTab:CreateSlider({
     end,
 })
 
-MainTab:CreateSlider({
+travelSlider = MainTab:CreateSlider({
     Name = "Velocidade do roubo",
     Range = {20, 120},
     Increment = 5,
@@ -1074,7 +1136,7 @@ MainTab:CreateButton({
 
 local FlyTab = Window:CreateTab("Voo", 4483362458)
 
-FlyTab:CreateToggle({
+jumpFlyToggle = FlyTab:CreateToggle({
     Name = "Voo: segurar pulo",
     CurrentValue = state.jumpFly,
     Flag = "jumpfly",
@@ -1140,7 +1202,7 @@ FlyTab:CreateButton({
 
 local VisualTab = Window:CreateTab("Visual", 4483362458)
 
-VisualTab:CreateToggle({
+espToggle = VisualTab:CreateToggle({
     Name = "ESP nos brainrots",
     CurrentValue = state.esp,
     Flag = "esp",
@@ -1148,6 +1210,23 @@ VisualTab:CreateToggle({
         state.esp = value
         drawEsp()
         markDirty()
+    end,
+})
+
+VisualTab:CreateButton({
+    Name = "Forcar bolinha visivel",
+    Callback = function()
+        pcall(function()
+            bubbleGui.Parent = playerGui
+        end)
+        bubbleGui.Enabled = true
+        bubble.Visible = true
+        bubble.Size = UDim2.fromOffset(58, 58)
+        bubble.TextTransparency = 0
+        bubble.BackgroundTransparency = 0
+        Rayfield:Notify({Title = "Bolinha",
+                         Content = "Reposicionada. Se nao aparecer, o executor bloqueia ScreenGui.",
+                         Duration = 5})
     end,
 })
 
