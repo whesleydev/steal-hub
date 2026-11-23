@@ -3,7 +3,7 @@
 -- sem webhook, sem HttpPost, sem leitura de arquivo. so a UI do Rayfield e a atualizacao vem de fora.
 
 local BASE = "https://raw.githubusercontent.com/whesleydev/steal-hub/main"
-local SCRIPT_VERSION = 8
+local SCRIPT_VERSION = 9
 
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
@@ -67,6 +67,7 @@ local state = {
     showStatus = true,
     useAir = true,
     flyHeight = 45,
+    jumpFly = true,
 }
 
 -- ===== configuracao persistente =====
@@ -123,6 +124,9 @@ if saved then
         state.useAir = saved.useAir
     end
     state.flyHeight = tonumber(saved.flyHeight) or state.flyHeight
+    if type(saved.jumpFly) == "boolean" then
+        state.jumpFly = saved.jumpFly
+    end
     state.bubblePos = saved.bubblePos
 end
 
@@ -158,6 +162,7 @@ local function saveConfig()
         useRoute = state.useRoute,
         useAir = state.useAir,
         flyHeight = state.flyHeight,
+        jumpFly = state.jumpFly,
         bubblePos = state.bubblePos,
     }
     local ok, encoded = pcall(function()
@@ -334,9 +339,12 @@ local function travelTo(target, speed, height)
     body.Name = "hubTravel"
     body.MaxForce = Vector3.new(1e5, 1e5, 1e5)
     body.Parent = root
-    local deadline = os.clock() + 9
+    local deadline = os.clock() + 10
     local reached = false
     local descending = false
+    local lastDistance = math.huge
+    local lastCheck = os.clock()
+    local bumped = 0
 
     while os.clock() < deadline do
         if _G.__stealHub ~= session then
@@ -347,6 +355,18 @@ local function travelTo(target, speed, height)
             break
         end
         local delta = goal - current.Position
+
+        if os.clock() - lastCheck > 0.9 and not descending then
+            local distance = delta.Magnitude
+            if distance > lastDistance - 6 and bumped < 4 then
+                bumped = bumped + 1
+                height = height + 25
+                goal = target + Vector3.new(0, height, 0)
+                delta = goal - current.Position
+            end
+            lastDistance = distance
+            lastCheck = os.clock()
+        end
 
         if descending then
             local drop = target.Y - current.Position.Y
@@ -543,6 +563,68 @@ local function startFly()
     end)
 end
 
+-- ===== voo segurando o pulo =====
+local jumpHold = 0
+local pressedUntil = 0
+local jumpFlyActive = false
+local jumpFlyBody = nil
+
+session.connections[#session.connections + 1] = UserInputService.JumpRequest:Connect(function()
+    pressedUntil = os.clock() + 0.35
+end)
+
+local function stopJumpFly()
+    jumpFlyActive = false
+    if jumpFlyBody then
+        pcall(function()
+            jumpFlyBody:Destroy()
+        end)
+        jumpFlyBody = nil
+    end
+end
+
+local function updateJumpFly(dt)
+    if not state.jumpFly or state.fly then
+        if jumpFlyActive then
+            stopJumpFly()
+        end
+        return
+    end
+    local char = LocalPlayer.Character
+    local humanoid = char and char:FindFirstChildOfClass("Humanoid")
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not humanoid or not root then
+        return
+    end
+
+    local held = UserInputService:IsKeyDown(Enum.KeyCode.Space)
+            or humanoid.Jump
+            or os.clock() < pressedUntil
+
+    if held then
+        jumpHold = math.min(jumpHold + dt, 4)
+    else
+        jumpHold = math.max(jumpHold - dt * 2.5, 0)
+    end
+
+    if jumpHold > 0.45 then
+        if not jumpFlyActive then
+            jumpFlyActive = true
+            jumpFlyBody = Instance.new("BodyVelocity")
+            jumpFlyBody.Name = "hubJumpFly"
+            jumpFlyBody.MaxForce = Vector3.new(1e5, 1e5, 1e5)
+            jumpFlyBody.Parent = root
+        end
+        if jumpFlyBody then
+            local move = humanoid.MoveDirection
+            jumpFlyBody.Velocity = Vector3.new(move.X * state.flySpeed,
+                    state.flySpeed * 0.8, move.Z * state.flySpeed)
+        end
+    elseif jumpFlyActive then
+        stopJumpFly()
+    end
+end
+
 local function applyMovement()
     local char = LocalPlayer.Character
     if not char then
@@ -590,13 +672,16 @@ local function findWindow()
     return nil, nil
 end
 
+local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    or LocalPlayer:WaitForChild("PlayerGui", 10)
+
 local bubbleGui = Instance.new("ScreenGui")
 bubbleGui.Name = "HubBubble"
 bubbleGui.ResetOnSpawn = false
 bubbleGui.IgnoreGuiInset = true
 bubbleGui.DisplayOrder = 999999
 bubbleGui.Enabled = false
-bubbleGui.Parent = uiRoot()
+bubbleGui.Parent = playerGui or uiRoot()
 
 local bubble = Instance.new("TextButton")
 bubble.Name = "bubble"
@@ -631,7 +716,7 @@ statusGui.ResetOnSpawn = false
 statusGui.IgnoreGuiInset = true
 statusGui.DisplayOrder = 999998
 statusGui.Enabled = state.showStatus
-statusGui.Parent = uiRoot()
+statusGui.Parent = playerGui or uiRoot()
 
 local statusText = Instance.new("TextLabel")
 statusText.Size = UDim2.fromOffset(300, 30)
@@ -656,6 +741,9 @@ session.bubble = bubbleGui
 
 local function showWindow(show)
     local gui, main = findWindow()
+    if not gui and not show then
+        return false
+    end
     if gui then
         if main then
             main.Visible = show
@@ -668,6 +756,7 @@ local function showWindow(show)
         TweenService:Create(bubble, TweenInfo.new(0.25, Enum.EasingStyle.Back),
                 {Size = UDim2.fromOffset(58, 58)}):Play()
     end
+    return true
 end
 
 local dragging = false
@@ -789,7 +878,10 @@ MainTab:CreateToggle({
 MainTab:CreateButton({
     Name = "Minimizar em bolinha",
     Callback = function()
-        showWindow(false)
+        if not showWindow(false) then
+            Rayfield:Notify({Title = "Bolinha",
+                             Content = "Nao achei a janela pra esconder.", Duration = 4})
+        end
     end,
 })
 
@@ -983,7 +1075,20 @@ MainTab:CreateButton({
 local FlyTab = Window:CreateTab("Voo", 4483362458)
 
 FlyTab:CreateToggle({
-    Name = "Voo infinito",
+    Name = "Voo: segurar pulo",
+    CurrentValue = state.jumpFly,
+    Flag = "jumpfly",
+    Callback = function(value)
+        state.jumpFly = value
+        if not value then
+            stopJumpFly()
+        end
+        markDirty()
+    end,
+})
+
+FlyTab:CreateToggle({
+    Name = "Voo infinito (toggle)",
     CurrentValue = false,
     Flag = "fly",
     Callback = function(value)
@@ -1122,6 +1227,10 @@ task.spawn(function()
             end
         end
     end
+end)
+
+session.connections[#session.connections + 1] = RunService.Heartbeat:Connect(function(dt)
+    updateJumpFly(dt)
 end)
 
 task.spawn(function()
