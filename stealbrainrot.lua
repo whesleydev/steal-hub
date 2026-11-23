@@ -3,7 +3,7 @@
 -- sem webhook, sem HttpPost, sem leitura de arquivo. so a UI do Rayfield e a atualizacao vem de fora.
 
 local BASE = "https://raw.githubusercontent.com/whesleydev/steal-hub/main"
-local SCRIPT_VERSION = 11
+local SCRIPT_VERSION = 12
 
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
@@ -331,178 +331,6 @@ local function status(text)
     end
 end
 
-local function travelTo(target, speed, height)
-    local root = rootPart()
-    if not root or not target then
-        return false
-    end
-    height = height or 0
-    local goal = target + Vector3.new(0, height, 0)
-    local body = Instance.new("BodyVelocity")
-    body.Name = "hubTravel"
-    body.MaxForce = Vector3.new(1e5, 1e5, 1e5)
-    body.Parent = root
-    local deadline = os.clock() + 10
-    local reached = false
-    local descending = false
-    local lastDistance = math.huge
-    local lastCheck = os.clock()
-    local bumped = 0
-
-    while os.clock() < deadline do
-        if _G.__stealHub ~= session then
-            break
-        end
-        local current = rootPart()
-        if not current then
-            break
-        end
-        local delta = goal - current.Position
-
-        if os.clock() - lastCheck > 0.9 and not descending then
-            local distance = delta.Magnitude
-            if distance > lastDistance - 6 and bumped < 4 then
-                bumped = bumped + 1
-                height = height + 25
-                goal = target + Vector3.new(0, height, 0)
-                delta = goal - current.Position
-            end
-            lastDistance = distance
-            lastCheck = os.clock()
-        end
-
-        if descending then
-            local drop = target.Y - current.Position.Y
-            body.Velocity = Vector3.new(0, math.clamp(drop * 4, -70, 70), 0)
-            if math.abs(drop) < 4 then
-                reached = true
-                break
-            end
-        elseif delta.Magnitude < 8 then
-            if height > 1 then
-                descending = true
-            else
-                reached = true
-                break
-            end
-        else
-            local flat = Vector3.new(delta.X, 0, delta.Z)
-            local direction = flat.Magnitude > 0.1 and flat.Unit or Vector3.zero
-            local lift = 0
-            if delta.Y > 3 then
-                lift = math.min(speed, 70)
-            elseif delta.Y < -3 then
-                lift = -math.min(speed, 70)
-            end
-            body.Velocity = direction * math.min(speed, 130) + Vector3.new(0, lift, 0)
-        end
-        RunService.Heartbeat:Wait()
-    end
-
-    pcall(function()
-        body:Destroy()
-    end)
-    return reached
-end
-
-local function fireNearby(radius)
-    local root = rootPart()
-    if not root then
-        return 0
-    end
-    local fired = 0
-    for _, prompt in ipairs(scan()) do
-        local anchor = anchorOf(prompt)
-        if anchor and (anchor.Position - root.Position).Magnitude <= radius then
-            fire(prompt)
-            fired = fired + 1
-        end
-    end
-    return fired
-end
-
-local function sweep(seconds)
-    local root = rootPart()
-    if not root then
-        return
-    end
-    local body = Instance.new("BodyVelocity")
-    body.Name = "hubSweep"
-    body.MaxForce = Vector3.new(1e5, 1e5, 1e5)
-    body.Parent = root
-    local start = os.clock()
-    while (os.clock() - start) < seconds and _G.__stealHub == session do
-        local angle = (os.clock() - start) * 9
-        body.Velocity = Vector3.new(math.cos(angle) * 12, 0, math.sin(angle) * 12)
-        RunService.Heartbeat:Wait()
-    end
-    pcall(function()
-        body:Destroy()
-    end)
-end
-
-local function runRoute()
-    if not state.eggSpot or not state.home then
-        return false
-    end
-    local ceiling = state.useAir and state.flyHeight or 0
-    status(string.format("rota: indo pro ovo (altura %d)", ceiling))
-    if not travelTo(state.eggSpot.Position, state.travelSpeed, ceiling) then
-        status("rota: nao chegou no ovo")
-        return false
-    end
-    sweep(1.2)
-    fireNearby(14)
-    task.wait(0.3)
-    status("rota: voltando pra base")
-    travelTo(state.home.Position, state.travelSpeed, ceiling)
-    sweep(1.0)
-    fireNearby(18)
-    status("rota: ciclo completo")
-    return true
-end
-
-local function nearestPrompt()
-    local root = rootPart()
-    if not root then
-        return nil, math.huge
-    end
-    local best, bestDistance = nil, math.huge
-    for _, prompt in ipairs(scan()) do
-        local anchor = anchorOf(prompt)
-        if anchor then
-            local distance = (anchor.Position - root.Position).Magnitude
-            if distance < bestDistance then
-                best, bestDistance = prompt, distance
-            end
-        end
-    end
-    return best, bestDistance
-end
-
-local function steal(prompt)
-    if not prompt then
-        return
-    end
-    local anchor = anchorOf(prompt)
-    if not anchor then
-        return
-    end
-    if not travelTo(anchor.Position + Vector3.new(0, 4, 0), state.travelSpeed) then
-        noteAttempt(prompt)
-        return
-    end
-    task.wait(0.12)
-    fire(prompt)
-    noteAttempt(prompt)
-    if state.returnHome and state.home then
-        task.wait(0.2)
-        travelTo(state.home.Position + Vector3.new(0, 4, 0), state.travelSpeed)
-        task.wait(0.1)
-        fireNearby(18)
-    end
-end
-
 -- ===== voo: rig de posicao, nao briga com a fisica =====
 local flyRig = {
     active = false,
@@ -632,6 +460,208 @@ local function updateFly(dt)
     if flyRig.orient then
         flyRig.orient.CFrame = CFrame.new(flyRig.target)
                 * CFrame.Angles(0, math.rad(root.Orientation.Y), 0)
+    end
+end
+
+local function travelTo(target, speed, height)
+    local root = rootPart()
+    if not root or not target then
+        return false
+    end
+    height = height or 0
+    local goal = target + Vector3.new(0, height, 0)
+
+    local owned = false
+    if not flyRig.active then
+        if not buildRig() then
+            return false
+        end
+        owned = true
+    end
+
+    flyRig.target = root.Position
+    flyRig.align.Position = flyRig.target
+
+    local maxSpeed = math.min(speed, 130)
+    local deadline = os.clock() + 14
+    local reached = false
+    local descending = false
+    local lastDistance = math.huge
+    local lastCheck = os.clock()
+    local bumped = 0
+
+    while os.clock() < deadline do
+        if _G.__stealHub ~= session then
+            break
+        end
+        local current = rootPart()
+        if not current or not flyRig.align then
+            break
+        end
+
+        local dt = RunService.Heartbeat:Wait()
+        if dt > 0.25 then
+            dt = 0.25
+        end
+
+        local delta = goal - flyRig.target
+
+        if os.clock() - lastCheck > 1.0 and not descending then
+            local distance = delta.Magnitude
+            if distance > lastDistance - 6 and bumped < 4 then
+                bumped = bumped + 1
+                height = height + 25
+                goal = target + Vector3.new(0, height, 0)
+                delta = goal - flyRig.target
+            end
+            lastDistance = distance
+            lastCheck = os.clock()
+        end
+
+        if descending then
+            local drop = target.Y - flyRig.target.Y
+            local step = math.clamp(drop, -maxSpeed * dt, maxSpeed * dt)
+            flyRig.target = flyRig.target + Vector3.new(0, step, 0)
+            if math.abs(drop) < 4 then
+                reached = true
+                break
+            end
+        elseif delta.Magnitude < 8 then
+            if height > 1 then
+                descending = true
+            else
+                reached = true
+                break
+            end
+        else
+            local flat = Vector3.new(delta.X, 0, delta.Z)
+            local direction = flat.Magnitude > 0.1 and flat.Unit or Vector3.zero
+            local lift = 0
+            if delta.Y > 3 then
+                lift = 1
+            elseif delta.Y < -3 then
+                lift = -1
+            end
+            local move = direction + Vector3.new(0, lift, 0)
+            if move.Magnitude > 0.01 then
+                flyRig.target = flyRig.target + move.Unit * maxSpeed * dt
+            end
+        end
+
+        flyRig.align.Position = flyRig.target
+    end
+
+    if owned then
+        destroyRig()
+    end
+    return reached
+end
+
+local function fireNearby(radius)
+    local root = rootPart()
+    if not root then
+        return 0
+    end
+    local fired = 0
+    for _, prompt in ipairs(scan()) do
+        local anchor = anchorOf(prompt)
+        if anchor and (anchor.Position - root.Position).Magnitude <= radius then
+            fire(prompt)
+            fired = fired + 1
+        end
+    end
+    return fired
+end
+
+local function sweep(seconds)
+    if not flyRig.active or not flyRig.align then
+        return
+    end
+    local center = flyRig.target
+    local start = os.clock()
+    while (os.clock() - start) < seconds and _G.__stealHub == session do
+        local dt = RunService.Heartbeat:Wait()
+        local angle = (os.clock() - start) * 9
+        flyRig.target = center + Vector3.new(math.cos(angle) * 10, 0, math.sin(angle) * 10)
+        flyRig.align.Position = flyRig.target
+    end
+    flyRig.target = center
+    flyRig.align.Position = center
+end
+
+local function runRoute()
+    if not state.eggSpot or not state.home then
+        return false
+    end
+    local owned = false
+    if not flyRig.active then
+        if not buildRig() then
+            return false
+        end
+        owned = true
+    end
+
+    local ceiling = state.useAir and state.flyHeight or 0
+    status(string.format("rota: indo pro ovo (altura %d)", ceiling))
+    if not travelTo(state.eggSpot.Position, state.travelSpeed, ceiling) then
+        status("rota: nao chegou no ovo")
+        if owned then
+            destroyRig()
+        end
+        return false
+    end
+    sweep(1.2)
+    fireNearby(14)
+    task.wait(0.3)
+    status("rota: voltando pra base")
+    travelTo(state.home.Position, state.travelSpeed, ceiling)
+    sweep(1.0)
+    fireNearby(18)
+    status("rota: ciclo completo")
+    if owned then
+        destroyRig()
+    end
+    return true
+end
+
+local function nearestPrompt()
+    local root = rootPart()
+    if not root then
+        return nil, math.huge
+    end
+    local best, bestDistance = nil, math.huge
+    for _, prompt in ipairs(scan()) do
+        local anchor = anchorOf(prompt)
+        if anchor then
+            local distance = (anchor.Position - root.Position).Magnitude
+            if distance < bestDistance then
+                best, bestDistance = prompt, distance
+            end
+        end
+    end
+    return best, bestDistance
+end
+
+local function steal(prompt)
+    if not prompt then
+        return
+    end
+    local anchor = anchorOf(prompt)
+    if not anchor then
+        return
+    end
+    if not travelTo(anchor.Position + Vector3.new(0, 4, 0), state.travelSpeed) then
+        noteAttempt(prompt)
+        return
+    end
+    task.wait(0.12)
+    fire(prompt)
+    noteAttempt(prompt)
+    if state.returnHome and state.home then
+        task.wait(0.2)
+        travelTo(state.home.Position + Vector3.new(0, 4, 0), state.travelSpeed)
+        task.wait(0.1)
+        fireNearby(18)
     end
 end
 
@@ -1318,7 +1348,9 @@ end)
 task.spawn(function()
     while _G.__stealHub == session do
         task.wait(0.25)
-        if state.autoSteal and (os.clock() - state.lastSteal) > state.cooldown then
+        if flyRig.holdTimer > 0.45 then
+            status("voo manual: auto pausado")
+        elseif state.autoSteal and (os.clock() - state.lastSteal) > state.cooldown then
             state.lastSteal = os.clock()
             if state.useRoute and state.eggSpot and state.home then
                 runRoute()
